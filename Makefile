@@ -35,21 +35,26 @@ $(VERILOG_DIR)/.stamp: $(HS_SRC)
 
 verilog: $(VERILOG_DIR)/.stamp
 
-# ==== 2) Auto-generate wrapper (ties RST=0, EN=1) ===========================
+# ==== 2) Auto-generate wrapper (ties RST=0, EN=1, connects buttons) =========
 $(VERILOG_DIR)/$(TOP)_wrapper.v: verilog
 	@mkdir -p $(VERILOG_DIR)
-	@echo "// Auto-generated wrapper: ties RST=0, EN=1"                >  $@
-	@echo "module $(TOP) ("                                            >> $@
-	@echo "  input wire clk,"                                          >> $@
-	@echo "  output wire [5:0] LED"                                    >> $@
-	@echo ");"                                                         >> $@
-	@echo "  wire RST = 1'b0;"                                         >> $@
-	@echo "  wire EN  = 1'b1;"                                         >> $@
-	@echo "  $(CLASH_TOP) u (.CLK(clk), .RST(RST), .EN(EN), .LED(LED));" >> $@
-	@echo "endmodule"                                                  >> $@
-
+	@echo "// Auto-generated wrapper: ties RST=0, EN=1, connects buttons"     >  $@
+	@echo "module $(TOP) ("                                                   >> $@
+	@echo "  input wire clk,"                                                 >> $@
+	@echo "  input wire btn1,"                                                >> $@
+	@echo "  input wire btn2,"                                                >> $@
+	@echo "  output wire [5:0] LED"                                           >> $@
+	@echo ");"                                                                >> $@
+	@echo "  wire RST = 1'b0;"                                                >> $@
+	@echo "  wire EN  = 1'b1;"                                                >> $@
+	@echo "  // Buttons are active low (0 when pressed) so invert"                >> $@
+	@echo "  wire BTN1 = ~btn1;"                                              >> $@
+	@echo "  wire BTN2 = ~btn2;"                                              >> $@
+	@echo "  $(CLASH_TOP) u (.CLK(clk), .RST(RST), .EN(EN), .BTN1(BTN1), .BTN2(BTN2), .LED(LED));" >> $@
+	@echo "endmodule"                                                         >> $@
 
 wrapper: $(VERILOG_DIR)/$(TOP)_wrapper.v
+
 # ==== 3) Synthesis with Yosys ===============================================
 $(BUILD_DIR)/top.json: verilog wrapper $(CST)
 	@mkdir -p $(BUILD_DIR)
@@ -65,7 +70,6 @@ $(BUILD_DIR)/top.json: verilog wrapper $(CST)
 	$(YOSYS) -q -s $(BUILD_DIR)/synth.ys
 
 synth: $(BUILD_DIR)/top.json
-
 
 # ==== 4) Place & Route with nextpnr =========================================
 $(BUILD_DIR)/pnr.json: $(BUILD_DIR)/top.json $(CST)

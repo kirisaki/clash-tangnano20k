@@ -2,6 +2,12 @@
 IO_LOC  "clk"     4;
 IO_PORT "clk"     PULL_MODE=NONE
 
+# Button inputs (Tang Nano 20K onboard buttons)
+IO_LOC  "btn1"    88;  # S1 button
+IO_LOC  "btn2"    87;  # S2 button  
+IO_PORT "btn1"    PULL_MODE=UP
+IO_PORT "btn2"    PULL_MODE=UP
+
 # LED outputs
 IO_LOC  "LED[0]"  15;
 IO_LOC  "LED[1]"  16;
