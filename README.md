@@ -13,13 +13,13 @@ This repository contains a **Clash (Haskell HDL)** sample project targeting the 
 
 2. Build and load to SRAM (temporary programming):
 
-  ```bash
+  ```console
    make sram
-  ````
+  ```
 
 3. To program the onboard flash (persistent):
 
-   ```bash
+  ```console
    make flash
   ```
 
