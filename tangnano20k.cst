@@ -1,7 +1,19 @@
 # Clock input (27 MHz oscillator)
-IO_LOC  "clk"   4;
-IO_PORT "clk"   PULL_MODE=NONE
+IO_LOC  "clk"     4;
+IO_PORT "clk"     PULL_MODE=NONE
 
-# LED output (onboard LED, pin 15 on Tang Nano 20K)
-IO_LOC  "LED"  15;
-IO_PORT "LED"  PULL_MODE=NONE DRIVE=8
+# LED outputs
+IO_LOC  "LED[0]"  15;
+IO_LOC  "LED[1]"  16;
+IO_LOC  "LED[2]"  17;  
+IO_LOC  "LED[3]"  18;  
+IO_LOC  "LED[4]"  19;  
+IO_LOC  "LED[5]"  20;  
+
+# LED port settings
+IO_PORT "LED[0]"  PULL_MODE=NONE DRIVE=8
+IO_PORT "LED[1]"  PULL_MODE=NONE DRIVE=8
+IO_PORT "LED[2]"  PULL_MODE=NONE DRIVE=8
+IO_PORT "LED[3]"  PULL_MODE=NONE DRIVE=8
+IO_PORT "LED[4]"  PULL_MODE=NONE DRIVE=8
+IO_PORT "LED[5]"  PULL_MODE=NONE DRIVE=8

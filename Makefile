@@ -39,14 +39,17 @@ verilog: $(VERILOG_DIR)/.stamp
 $(VERILOG_DIR)/$(TOP)_wrapper.v: verilog
 	@mkdir -p $(VERILOG_DIR)
 	@echo "// Auto-generated wrapper: ties RST=0, EN=1"                >  $@
-	@echo "module $(TOP) (input wire clk, output wire LED);"           >> $@
+	@echo "module $(TOP) ("                                            >> $@
+	@echo "  input wire clk,"                                          >> $@
+	@echo "  output wire [5:0] LED"                                    >> $@
+	@echo ");"                                                         >> $@
 	@echo "  wire RST = 1'b0;"                                         >> $@
 	@echo "  wire EN  = 1'b1;"                                         >> $@
 	@echo "  $(CLASH_TOP) u (.CLK(clk), .RST(RST), .EN(EN), .LED(LED));" >> $@
 	@echo "endmodule"                                                  >> $@
 
-wrapper: $(VERILOG_DIR)/$(TOP)_wrapper.v
 
+wrapper: $(VERILOG_DIR)/$(TOP)_wrapper.v
 # ==== 3) Synthesis with Yosys ===============================================
 $(BUILD_DIR)/top.json: verilog wrapper $(CST)
 	@mkdir -p $(BUILD_DIR)
