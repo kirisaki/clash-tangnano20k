@@ -1,0 +1,40 @@
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Cabal / GHC ---
+dist/
+dist-*/
+dist-newstyle/
+.cabal-sandbox/
+cabal.sandbox.config
+cabal.project.local*
+.ghc.environment.*
+.hie/
+.hie-bios/
+.ghci
+.ghcid
+.stack-work/
+*.hi
+*.o
+
+# --- Generated HDL & build outputs ---
+# Clash が吐く Verilog と、auto wrapper、合成スクリプト/成果物
+verilog/
+build/
+
+# --- Common EDA/trace artifacts (保険でディレクトリ外に出ても無視) ---
+*.rpt
+*.log
+*.vcd
+*.gtkw
+*.ys
+
+# --- Editors/IDEs ---
+.vscode/
+.idea/
+*.code-workspace
+
+# --- Tags ---
+tags
+TAGS
