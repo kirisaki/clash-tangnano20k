@@ -1,7 +1,7 @@
 # ==== Settings ===============================================================
-# Clash Haskell source (where topEntity is defined)
-HS_SRC      ?= app/Main.hs
-# Clash-emitted top module name (Haskell側の t_name と一致させる)
+# Clash Haskell sources
+HS_SRC      ?= app/Main.hs app/Types.hs app/Button.hs app/LED.hs app/UART.hs
+# Clash-emitted top module name (matches t_name in Haskell)
 CLASH_TOP   ?= blinky
 
 # Wrapper top name (ties RST=0, EN=1)
@@ -30,27 +30,29 @@ all: sram
 # ==== 1) Generate Verilog from Clash ========================================
 $(VERILOG_DIR)/.stamp: $(HS_SRC)
 	@mkdir -p $(VERILOG_DIR)
-	cabal exec -- $(CLASH) --verilog -outputdir $(VERILOG_DIR) $(HS_SRC)
+	cabal exec -- $(CLASH) --verilog -outputdir $(VERILOG_DIR) -iapp app/Main.hs
 	@touch $(VERILOG_DIR)/.stamp
 
 verilog: $(VERILOG_DIR)/.stamp
 
-# ==== 2) Auto-generate wrapper (ties RST=0, EN=1, connects buttons) =========
+# ==== 2) Auto-generate wrapper (ties RST=0, EN=1, connects buttons and UART) ===
 $(VERILOG_DIR)/$(TOP)_wrapper.v: verilog
 	@mkdir -p $(VERILOG_DIR)
-	@echo "// Auto-generated wrapper: ties RST=0, EN=1, connects buttons"     >  $@
+	@echo "// Auto-generated wrapper: ties RST=0, EN=1, connects buttons and UART" >  $@
 	@echo "module $(TOP) ("                                                   >> $@
 	@echo "  input wire clk,"                                                 >> $@
 	@echo "  input wire btn1,"                                                >> $@
 	@echo "  input wire btn2,"                                                >> $@
-	@echo "  output wire [5:0] LED"                                           >> $@
+	@echo "  input wire UART_RX,"                                             >> $@
+	@echo "  output wire [5:0] LED,"                                          >> $@
+	@echo "  output wire UART_TX"                                             >> $@
 	@echo ");"                                                                >> $@
 	@echo "  wire RST = 1'b0;"                                                >> $@
 	@echo "  wire EN  = 1'b1;"                                                >> $@
-	@echo "  // Buttons are active low (0 when pressed) so invert"                >> $@
+	@echo "  // Buttons are active low (0 when pressed) so invert"           >> $@
 	@echo "  wire BTN1 = ~btn1;"                                              >> $@
 	@echo "  wire BTN2 = ~btn2;"                                              >> $@
-	@echo "  $(CLASH_TOP) u (.CLK(clk), .RST(RST), .EN(EN), .BTN1(BTN1), .BTN2(BTN2), .LED(LED));" >> $@
+	@echo "  $(CLASH_TOP) u (.CLK(clk), .RST(RST), .EN(EN), .BTN1(BTN1), .BTN2(BTN2), .UART_RX(UART_RX), .LED(LED), .UART_TX(UART_TX));" >> $@
 	@echo "endmodule"                                                         >> $@
 
 wrapper: $(VERILOG_DIR)/$(TOP)_wrapper.v

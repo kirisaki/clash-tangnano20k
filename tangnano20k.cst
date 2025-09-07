@@ -8,6 +8,12 @@ IO_LOC  "btn2"    87;  # S2 button
 IO_PORT "btn1"    PULL_MODE=UP
 IO_PORT "btn2"    PULL_MODE=UP
 
+# UART pins
+IO_LOC  "UART_RX" 30;  # GPIO pin for UART RX
+IO_LOC  "UART_TX" 31;  # GPIO pin for UART TX
+IO_PORT "UART_RX" PULL_MODE=UP
+IO_PORT "UART_TX" PULL_MODE=NONE DRIVE=8
+
 # LED outputs
 IO_LOC  "LED[0]"  15;
 IO_LOC  "LED[1]"  16;

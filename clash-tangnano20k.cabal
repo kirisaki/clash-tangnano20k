@@ -5,6 +5,7 @@ build-type:     Simple
 
 executable clash-tangnano20k
   main-is:             Main.hs
+  other-modules:       Types, Button, LED, UART
   hs-source-dirs:      app
   default-language:    Haskell2010
   default-extensions:  
