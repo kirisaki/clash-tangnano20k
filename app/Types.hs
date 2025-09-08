@@ -56,3 +56,16 @@ ledPositionToBits pos = invertBits $ vecToBits $ vecFromIndex (fromEnum pos)
 
     invertBits :: Vec 6 Bit -> Vec 6 Bit
     invertBits = map complement
+
+-- ButtonEvent の論理和（どちらかが Press なら Press）
+orButtonEvent :: ButtonEvent -> ButtonEvent -> ButtonEvent
+orButtonEvent ButtonPress _ = ButtonPress
+orButtonEvent _ ButtonPress = ButtonPress
+orButtonEvent _ _ = NoEvent
+
+-- Signal 版の合流（便利関数）
+orButtonEventS ::
+  Signal dom ButtonEvent ->
+  Signal dom ButtonEvent ->
+  Signal dom ButtonEvent
+orButtonEventS = liftA2 orButtonEvent

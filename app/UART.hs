@@ -65,74 +65,106 @@ uartTx start txData = (txLine, busy)
     -- Shift register (10 bits: start + 8 data + stop)
     shiftData =
       register (0x3FF :: Unsigned 10)
-        $ mux start (liftA2 (\d -> \_ -> 0x200 .|. resize d) txData (pure ()))
-        $ mux
-          ((txState .==. pure TxStart .||. txState .==. pure TxData .||. txState .==. pure TxStop) .&&. baudTick)
-          ((`shiftR` 1) <$> shiftData)
-        $ shiftData
-
+        $
+        -- start 立ち上がりで [stop=1][data<<1][start=0] をロード
+        mux
+          start
+          ((\d -> (0x200 :: Unsigned 10) .|. (resize d `shiftL` 1)) <$> txData)
+          -- 送信中はボーレート毎に右シフト、MSB に 1 を詰める
+          ( mux
+              ( ( txState .==. pure TxStart
+                    .||. txState .==. pure TxData
+                    .||. txState .==. pure TxStop
+                )
+                  .&&. baudTick
+              )
+              ((.|. 0x200) . (`shiftR` 1) <$> shiftData)
+              shiftData
+          )
     -- Output
     txLine = lsb <$> shiftData
     busy = txState ./=. pure TxIdle
 
--- === UART Receiver ===
+data RxS = RxS
+  { st :: UartRxState,
+    osc :: Unsigned 4,
+    bc :: Unsigned 4,
+    sh :: Unsigned 8
+  }
+  deriving (Generic, NFDataX)
 
+-- === UART Receiver (NCO + 16x oversampling; start→half→8×full→stop) ===
 uartRx ::
   (HiddenClockResetEnable dom) =>
-  Signal dom Bit -> -- RX line
-  (Signal dom (Unsigned 8), Signal dom Bool) -- (Received data, Data valid)
+  Signal dom Bit -> -- RX line (idle=high)
+  (Signal dom (Unsigned 8), Signal dom Bool) -- (data, valid 1clk)
 uartRx rxLine = (rxData, dataValid)
   where
-    -- Synchronize RX input
-    rxSync = register high $ register high rxLine
+    -- 2段同期
+    rxSync = register high (register high rxLine)
 
-    -- Baud rate counter (sample at middle)
-    baudCnt =
-      register (0 :: Unsigned 8)
-        $ mux (rxState .==. pure RxIdle) (pure 0)
-        $ mux (baudCnt .==. pure (baudDivider `div` 2 - 1)) (pure 0)
-        $ (pure 1 + baudCnt)
+    -- NCO: acc += inc; if acc >= modv then acc -= modv; osTick := accTemp >= modv
+    clockHz :: Unsigned 48
+    clockHz = 27000000
+    baudRate :: Unsigned 48
+    baudRate = 115200
+    osRate :: Unsigned 8
+    osRate = 16
 
-    baudTick = baudCnt .==. pure (baudDivider `div` 2 - 1)
+    incVal :: Unsigned 48
+    incVal = baudRate * resize osRate
+    modvVal :: Unsigned 48
+    modvVal = clockHz
 
-    -- RX state machine
-    rxState =
-      register RxIdle
-        $ mux
-          (rxState .==. pure RxIdle)
-          (mux (rxSync .==. pure low) (pure RxStart) (pure RxIdle))
-        $ mux
-          (rxState .==. pure RxStart)
-          (mux baudTick (pure RxData) (pure RxStart))
-        $ mux
-          (rxState .==. pure RxData)
-          (mux (baudTick .&&. (bitCnt .==. pure 7)) (pure RxStop) (pure RxData))
-        $ mux baudTick (pure RxIdle) (pure RxStop)
+    acc = register 0 accNext
+    accTemp = (+) <$> acc <*> pure incVal
+    osTick = (>=) <$> accTemp <*> pure modvVal
+    accNext = mux osTick ((-) <$> accTemp <*> pure modvVal) accTemp
 
-    -- Bit counter
-    bitCnt =
-      register (0 :: Unsigned 4)
-        $ mux (rxState .==. pure RxIdle) (pure 0)
-        $ mux (rxState .==. pure RxData .&&. baudTick) (pure 1 + bitCnt)
-        $ bitCnt
+    -- mealy 状態
 
-    -- Shift register for received data
-    shiftData =
-      register (0 :: Unsigned 8)
-        $ mux
-          (rxState .==. pure RxData .&&. baudTick)
-          (liftA2 (\sr rx -> (sr `shiftR` 1) .|. if rx == high then 0x80 else 0x00) shiftData rxSync)
-        $ shiftData
+    s0 = RxS {st = RxIdle, osc = 0, bc = 0, sh = 0}
 
-    -- Data valid flag
-    validFlag =
-      register False
-        $ mux (rxState .==. pure RxStop .&&. baudTick) (pure True)
-        $ (pure False)
+    osMax :: Unsigned 4
+    osMax = 15 -- OS-1
+    halfM1 :: Unsigned 4
+    halfM1 = 8
 
-    -- Output
-    rxData = shiftData
-    dataValid = validFlag
+    -- 1tick ごとに状態を進める。tick=0 の間は保持。
+    step :: RxS -> (Bool, Bit) -> (RxS, (Unsigned 8, Bool))
+    step s (tick, rx) =
+      if not tick
+        then (s, (sh s, False))
+        else case st s of
+          RxIdle ->
+            if rx == low
+              then (s {st = RxStart, osc = 0, bc = 0}, (sh s, False))
+              else (s {osc = 0, bc = 0}, (sh s, False))
+          -- スタート中央で再確認（ノイズ除去）
+          RxStart ->
+            if osc s == halfM1
+              then
+                if rx == low
+                  then (s {st = RxData, osc = 0, bc = 0}, (sh s, False))
+                  else (s {st = RxIdle, osc = 0, bc = 0}, (sh s, False))
+              else (s {osc = osc s + 1}, (sh s, False))
+          -- データ：各ビットの最後でサンプル（中央相当）
+          RxData ->
+            if osc s == osMax
+              then
+                let sh' = ((if rx == high then 0x80 else 0x00) :: Unsigned 8) .|. (sh s `shiftR` 1)
+                    bc' = bc s + 1
+                    st' = if bc s == 7 then RxStop else RxData
+                 in (s {st = st', osc = 0, bc = bc', sh = sh'}, (sh', False))
+              else (s {osc = osc s + 1}, (sh s, False))
+          -- ストップ中央で valid を 1clk パルス
+          RxStop ->
+            if osc s == osMax
+              then (s {st = RxIdle, osc = 0, bc = 0}, (sh s, rx == high))
+              else (s {osc = osc s + 1}, (sh s, False))
+
+    (rxData, dataValid) =
+      unbundle (mealy step s0 (bundle (osTick, rxSync)))
 
 -- === Message Transmission Control ===
 
