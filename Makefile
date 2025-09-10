@@ -1,6 +1,7 @@
 # ==== Settings ===============================================================
-# Clash Haskell sources
+# Clash Haskell sources (updated module list)
 HS_SRC      ?= app/Main.hs app/Types.hs app/Button.hs app/LED.hs app/UART.hs
+
 # Clash-emitted top module name (matches t_name in Haskell)
 CLASH_TOP   ?= blinky
 
@@ -23,7 +24,7 @@ GOWIN_PACK    ?= $(OSSCAD)/bin/gowin_pack
 LOADER        ?= $(OSSCAD)/bin/openFPGALoader
 
 # ==== Phony targets ==========================================================
-.PHONY: all verilog wrapper synth pnr pack sram flash clean realclean check
+.PHONY: all verilog wrapper synth pnr pack sram flash clean realclean check test
 
 all: sram
 
@@ -38,22 +39,34 @@ verilog: $(VERILOG_DIR)/.stamp
 # ==== 2) Auto-generate wrapper (ties RST=0, EN=1, connects buttons and UART) ===
 $(VERILOG_DIR)/$(TOP)_wrapper.v: verilog
 	@mkdir -p $(VERILOG_DIR)
-	@echo "// Auto-generated wrapper: ties RST=0, EN=1, connects buttons and UART" >  $@
-	@echo "module $(TOP) ("                                                   >> $@
-	@echo "  input wire clk,"                                                 >> $@
-	@echo "  input wire btn1,"                                                >> $@
-	@echo "  input wire btn2,"                                                >> $@
-	@echo "  input wire UART_RX,"                                             >> $@
-	@echo "  output wire [5:0] LED,"                                          >> $@
-	@echo "  output wire UART_TX"                                             >> $@
-	@echo ");"                                                                >> $@
-	@echo "  wire RST = 1'b0;"                                                >> $@
-	@echo "  wire EN  = 1'b1;"                                                >> $@
-	@echo "  // Buttons are active low (0 when pressed) so invert"           >> $@
-	@echo "  wire BTN1 = ~btn1;"                                              >> $@
-	@echo "  wire BTN2 = ~btn2;"                                              >> $@
-	@echo "  $(CLASH_TOP) u (.CLK(clk), .RST(RST), .EN(EN), .BTN1(BTN1), .BTN2(BTN2), .UART_RX(UART_RX), .LED(LED), .UART_TX(UART_TX));" >> $@
-	@echo "endmodule"                                                         >> $@
+	@echo "// Auto-generated wrapper for $(CLASH_TOP)" >  $@
+	@echo "// Ties RST=0, EN=1, connects buttons and UART" >> $@
+	@echo "module $(TOP) ("                                 >> $@
+	@echo "  input wire clk,"                               >> $@
+	@echo "  input wire btn1,"                              >> $@
+	@echo "  input wire btn2,"                              >> $@
+	@echo "  input wire UART_RX,"                           >> $@
+	@echo "  output wire [5:0] LED,"                        >> $@
+	@echo "  output wire UART_TX"                           >> $@
+	@echo ");"                                              >> $@
+	@echo "  // System control signals"                     >> $@
+	@echo "  wire RST = 1'b0;"                              >> $@
+	@echo "  wire EN  = 1'b1;"                              >> $@
+	@echo "  // Button inversion (active low hardware -> active high logic)" >> $@
+	@echo "  wire BTN1 = ~btn1;"                            >> $@
+	@echo "  wire BTN2 = ~btn2;"                            >> $@
+	@echo "  // Instantiate Clash-generated module"         >> $@
+	@echo "  $(CLASH_TOP) u_$(CLASH_TOP) ("                 >> $@
+	@echo "    .CLK(clk),"                                  >> $@
+	@echo "    .RST(RST),"                                  >> $@
+	@echo "    .EN(EN),"                                    >> $@
+	@echo "    .BTN1(BTN1),"                                >> $@
+	@echo "    .BTN2(BTN2),"                                >> $@
+	@echo "    .UART_RX(UART_RX),"                          >> $@
+	@echo "    .LED(LED),"                                  >> $@
+	@echo "    .UART_TX(UART_TX)"                           >> $@
+	@echo "  );"                                            >> $@
+	@echo "endmodule"                                       >> $@
 
 wrapper: $(VERILOG_DIR)/$(TOP)_wrapper.v
 
@@ -61,8 +74,9 @@ wrapper: $(VERILOG_DIR)/$(TOP)_wrapper.v
 $(BUILD_DIR)/top.json: verilog wrapper $(CST)
 	@mkdir -p $(BUILD_DIR)
 	@vfiles="$$(find $(VERILOG_DIR) -type f -name '*.v' | tr '\n' ' ')"; \
-	echo "[INFO] Verilog files:" $$vfiles; \
+	echo "[INFO] Synthesizing with Verilog files: $$vfiles"; \
 	printf '%s\n' \
+	  "# Clash Tang Nano 20K synthesis script" \
 	  "read_verilog $$vfiles" \
 	  "hierarchy -check -top $(TOP)" \
 	  "proc; opt; fsm; opt; memory; opt" \
@@ -97,18 +111,35 @@ sram: $(BUILD_DIR)/top.fs
 flash: $(BUILD_DIR)/top.fs
 	$(LOADER) -b $(BOARD) -f $(BUILD_DIR)/top.fs
 
+# ==== Testing =================================================================
+test:
+	@echo "Running Clash test suite..."
+	cabal run clash-tangnano20k
+
 # ==== Utilities ==============================================================
 check:
-	@echo "== Clash top (expected) : $(CLASH_TOP)"
-	@echo "== Wrapper top          : $(TOP)"
-	@echo "== Verilog head         :"
-	@/bin/sh -c 'head -n 3 $(VERILOG_DIR)/*.v 2>/dev/null || true'
-	@echo "== Yosys design hierarchy (short) :"
-	@/bin/sh -c 'vfiles="$$(find $(VERILOG_DIR) -type f -name "*.v" | tr "\n" " ")"; \
-	  test -n "$$vfiles" && $(YOSYS) -p "read_verilog $$vfiles; stat" | sed -n "/=== design hierarchy ===/,\$$p" | head -n 40 || echo "(no verilog yet)"'
+	@echo "== Build Configuration Check =="
+	@echo "Clash top module      : $(CLASH_TOP)"
+	@echo "Wrapper top module    : $(TOP)"
+	@echo "Target device         : $(DEVICE)"
+	@echo "Constraint file       : $(CST)"
+	@echo "Haskell sources       : $(HS_SRC)"
+	@echo ""
+	@echo "== Generated Verilog Files =="
+	@/bin/sh -c 'ls -la $(VERILOG_DIR)/*.v 2>/dev/null || echo "No Verilog files generated yet"'
+	@echo ""
+	@echo "== Design Hierarchy Preview =="
+	@/bin/sh -c 'if [ -d "$(VERILOG_DIR)" ]; then \
+	  vfiles="$$(find $(VERILOG_DIR) -type f -name "*.v" | tr "\n" " ")"; \
+	  test -n "$$vfiles" && $(YOSYS) -p "read_verilog $$vfiles; hierarchy -check -top $(TOP); stat" 2>/dev/null | \
+	  sed -n "/=== design hierarchy ===/,\$$p" | head -n 20 || echo "Cannot analyze hierarchy yet"; \
+	else echo "No Verilog directory found"; fi'
 
 clean:
 	@rm -rf $(BUILD_DIR) $(VERILOG_DIR)/$(TOP)_wrapper.v $(VERILOG_DIR)/.stamp
+	@echo "Build artifacts cleaned"
 
 realclean: clean
 	@rm -rf $(VERILOG_DIR)
+	@cabal clean
+	@echo "All generated files cleaned"

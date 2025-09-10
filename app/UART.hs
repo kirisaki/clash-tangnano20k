@@ -1,182 +1,195 @@
-module UART where
+module UART
+  ( uartTx,
+    uartRx,
+    countMessageTx,
+    keyToButtonEvents,
+  )
+where
 
 import Clash.Prelude
 import Types
 
--- === UART Configuration ===
--- For 27MHz clock, 115200 baud
--- Divider = 27,000,000 / 115200 ≈ 234
-baudDivider :: Unsigned 8
-baudDivider = 234
+-- =============================================================================
+-- UART Transmitter
+-- =============================================================================
 
--- === UART Transmitter ===
-
--- ASCII conversion utility
-digitToAscii :: Unsigned 4 -> Unsigned 8
-digitToAscii d = 0x30 + resize d
-
--- Convert LED position to digit
-ledPositionToDigit :: LedPosition -> Unsigned 4
-ledPositionToDigit Led0 = 0
-ledPositionToDigit Led1 = 1
-ledPositionToDigit Led2 = 2
-ledPositionToDigit Led3 = 3
-ledPositionToDigit Led4 = 4
-ledPositionToDigit Led5 = 5
-
--- Simple UART transmitter
+-- | UART transmitter with 8N1 format (8 data bits, no parity, 1 stop bit)
+-- Transmits at 115200 baud with 27MHz clock
 uartTx ::
   (HiddenClockResetEnable dom) =>
-  Signal dom Bool -> -- Start transmission
-  Signal dom (Unsigned 8) -> -- Transmit data
-  (Signal dom Bit, Signal dom Bool) -- (TX line, Busy)
+  -- | Start transmission trigger
+  Signal dom Bool ->
+  -- | Data byte to transmit
+  Signal dom (Unsigned 8) ->
+  -- | (TX line output, Busy flag)
+  (Signal dom Bit, Signal dom Bool)
 uartTx start txData = (txLine, busy)
   where
-    -- Baud rate counter
-    baudCnt =
-      register (0 :: Unsigned 8)
-        $ mux (register False start) (pure 0)
-        $ mux (baudCnt .==. pure (baudDivider - 1)) (pure 0)
-        $ (pure 1 + baudCnt)
+    -- Baud rate timing counter
+    baudCnt = register (0 :: Unsigned 8) baudCntNext
+    baudCntNext =
+      mux
+        (register False start)
+        (pure 0)
+        ( mux
+            (baudCnt .==. pure (uartBaudDivider - 1))
+            (pure 0)
+            (baudCnt + pure 1)
+        )
 
-    baudTick = baudCnt .==. pure (baudDivider - 1)
+    baudTick = baudCnt .==. pure (uartBaudDivider - 1)
 
-    -- TX state machine
-    txState =
-      register TxIdle
-        $ mux
-          (txState .==. pure TxIdle)
-          (mux start (pure TxStart) (pure TxIdle))
-        $ mux
-          (txState .==. pure TxStart)
-          (mux baudTick (pure TxData) (pure TxStart))
-        $ mux
-          (txState .==. pure TxData)
-          (mux (baudTick .&&. (bitCnt .==. pure 8)) (pure TxStop) (pure TxData))
-        $ mux baudTick (pure TxIdle) (pure TxStop)
-
-    -- Bit counter
-    bitCnt =
-      register (0 :: Unsigned 4)
-        $ mux (txState .==. pure TxIdle) (pure 0)
-        $ mux (txState .==. pure TxData .&&. baudTick) (pure 1 + bitCnt)
-        $ bitCnt
-
-    -- Shift register (10 bits: start + 8 data + stop)
-    shiftData =
-      register (0x3FF :: Unsigned 10)
-        $
-        -- start 立ち上がりで [stop=1][data<<1][start=0] をロード
-        mux
-          start
-          ((\d -> (0x200 :: Unsigned 10) .|. (resize d `shiftL` 1)) <$> txData)
-          -- 送信中はボーレート毎に右シフト、MSB に 1 を詰める
-          ( mux
-              ( ( txState .==. pure TxStart
-                    .||. txState .==. pure TxData
-                    .||. txState .==. pure TxStop
+    -- Transmitter state machine
+    txState = register TxIdle txStateNext
+    txStateNext =
+      mux
+        (txState .==. pure TxIdle)
+        (mux start (pure TxStart) (pure TxIdle))
+        ( mux
+            (txState .==. pure TxStart)
+            (mux baudTick (pure TxData) (pure TxStart))
+            ( mux
+                (txState .==. pure TxData)
+                ( mux
+                    (baudTick .&&. (bitCnt .==. pure 8))
+                    (pure TxStop)
+                    (pure TxData)
                 )
-                  .&&. baudTick
-              )
-              ((.|. 0x200) . (`shiftR` 1) <$> shiftData)
-              shiftData
-          )
-    -- Output
+                (mux baudTick (pure TxIdle) (pure TxStop))
+            )
+        )
+
+    -- Bit counter for data transmission
+    bitCnt = register (0 :: Unsigned 4) bitCntNext
+    bitCntNext =
+      mux
+        (txState .==. pure TxIdle)
+        (pure 0)
+        ( mux
+            (txState .==. pure TxData .&&. baudTick)
+            (bitCnt + pure 1)
+            bitCnt
+        )
+
+    -- 10-bit shift register: [stop][data(7:0)][start]
+    shiftData = register (0x3FF :: Unsigned 10) shiftDataNext
+    shiftDataNext =
+      mux
+        start
+        ((\d -> (0x200 :: Unsigned 10) .|. (resize d `shiftL` 1)) <$> txData)
+        ( mux
+            (isTxActive .&&. baudTick)
+            ((.|. 0x200) . (`shiftR` 1) <$> shiftData)
+            shiftData
+        )
+
+    isTxActive =
+      (txState .==. pure TxStart)
+        .||. (txState .==. pure TxData)
+        .||. (txState .==. pure TxStop)
+
+    -- Output signals
     txLine = lsb <$> shiftData
     busy = txState ./=. pure TxIdle
 
-data RxS = RxS
-  { st :: UartRxState,
-    osc :: Unsigned 4,
-    bc :: Unsigned 4,
-    sh :: Unsigned 8
-  }
-  deriving (Generic, NFDataX)
+-- =============================================================================
+-- UART Receiver
+-- =============================================================================
 
--- === UART Receiver (NCO + 16x oversampling; start→half→8×full→stop) ===
+-- | UART receiver with 16x oversampling and NCO-based baud rate generation
+-- Receives 8N1 format at 115200 baud
 uartRx ::
   (HiddenClockResetEnable dom) =>
-  Signal dom Bit -> -- RX line (idle=high)
-  (Signal dom (Unsigned 8), Signal dom Bool) -- (data, valid 1clk)
+  -- | RX line input (idle = high)
+  Signal dom Bit ->
+  -- | (Received data, Valid pulse)
+  (Signal dom (Unsigned 8), Signal dom Bool)
 uartRx rxLine = (rxData, dataValid)
   where
-    -- 2段同期
+    -- Two-stage synchronizer for RX input
     rxSync = register high (register high rxLine)
 
-    -- NCO: acc += inc; if acc >= modv then acc -= modv; osTick := accTemp >= modv
-    clockHz :: Unsigned 48
-    clockHz = 27000000
-    baudRate :: Unsigned 48
-    baudRate = 115200
-    osRate :: Unsigned 8
-    osRate = 16
+    -- NCO (Numerically Controlled Oscillator) for oversampling clock
+    -- Generates 16x oversampling rate from system clock
+    clockHz = 27_000_000 :: Unsigned 48
+    baudRate = 115_200 :: Unsigned 48
+    osRate = 16 :: Unsigned 48
 
-    incVal :: Unsigned 48
-    incVal = baudRate * resize osRate
-    modvVal :: Unsigned 48
-    modvVal = clockHz
+    incVal = baudRate * osRate
+    modVal = clockHz
 
-    acc = register 0 accNext
-    accTemp = (+) <$> acc <*> pure incVal
-    osTick = (>=) <$> accTemp <*> pure modvVal
-    accNext = mux osTick ((-) <$> accTemp <*> pure modvVal) accTemp
+    ncoAcc = register 0 ncoAccNext
+    ncoTemp = ncoAcc + pure incVal
+    osTick = ncoTemp .>=. pure modVal
+    ncoAccNext = mux osTick (ncoTemp - pure modVal) ncoTemp
 
-    -- mealy 状態
+    -- Initial state for receiver state machine
+    rxInitState =
+      UartRxInternalState
+        { rxState = RxIdle,
+          oversampleCnt = 0,
+          bitCnt = 0,
+          shiftReg = 0
+        }
 
-    s0 = RxS {st = RxIdle, osc = 0, bc = 0, sh = 0}
-
-    osMax :: Unsigned 4
-    osMax = 15 -- OS-1
-    halfM1 :: Unsigned 4
-    halfM1 = 8
-
-    -- 1tick ごとに状態を進める。tick=0 の間は保持。
-    step :: RxS -> (Bool, Bit) -> (RxS, (Unsigned 8, Bool))
-    step s (tick, rx) =
-      if not tick
-        then (s, (sh s, False))
-        else case st s of
-          RxIdle ->
-            if rx == low
-              then (s {st = RxStart, osc = 0, bc = 0}, (sh s, False))
-              else (s {osc = 0, bc = 0}, (sh s, False))
-          -- スタート中央で再確認（ノイズ除去）
-          RxStart ->
-            if osc s == halfM1
-              then
-                if rx == low
-                  then (s {st = RxData, osc = 0, bc = 0}, (sh s, False))
-                  else (s {st = RxIdle, osc = 0, bc = 0}, (sh s, False))
-              else (s {osc = osc s + 1}, (sh s, False))
-          -- データ：各ビットの最後でサンプル（中央相当）
-          RxData ->
-            if osc s == osMax
-              then
-                let sh' = ((if rx == high then 0x80 else 0x00) :: Unsigned 8) .|. (sh s `shiftR` 1)
-                    bc' = bc s + 1
-                    st' = if bc s == 7 then RxStop else RxData
-                 in (s {st = st', osc = 0, bc = bc', sh = sh'}, (sh', False))
-              else (s {osc = osc s + 1}, (sh s, False))
-          -- ストップ中央で valid を 1clk パルス
-          RxStop ->
-            if osc s == osMax
-              then (s {st = RxIdle, osc = 0, bc = 0}, (sh s, rx == high))
-              else (s {osc = osc s + 1}, (sh s, False))
-
+    -- Receiver state machine (Mealy machine)
     (rxData, dataValid) =
-      unbundle (mealy step s0 (bundle (osTick, rxSync)))
+      unbundle
+        $ mealy rxStateMachine rxInitState (bundle (osTick, rxSync))
 
--- === Message Transmission Control ===
+-- | UART receiver state machine implementation
+rxStateMachine ::
+  UartRxInternalState ->
+  (Bool, Bit) ->
+  (UartRxInternalState, (Unsigned 8, Bool))
+rxStateMachine s (tick, rx)
+  | not tick = (s, (shiftReg s, False)) -- Hold state when no tick
+  | otherwise = case rxState s of
+      RxIdle ->
+        if rx == low
+          then (s {rxState = RxStart, oversampleCnt = 0, bitCnt = 0}, (shiftReg s, False))
+          else (s {oversampleCnt = 0, bitCnt = 0}, (shiftReg s, False))
+      RxStart ->
+        if oversampleCnt s == 8 -- Half bit time (center of start bit)
+          then
+            if rx == low
+              then (s {rxState = RxData, oversampleCnt = 0, bitCnt = 0}, (shiftReg s, False))
+              else (s {rxState = RxIdle, oversampleCnt = 0, bitCnt = 0}, (shiftReg s, False))
+          else (s {oversampleCnt = oversampleCnt s + 1}, (shiftReg s, False))
+      RxData ->
+        if oversampleCnt s == 15 -- End of bit time
+          then
+            let newShift = (if rx == high then 0x80 else 0x00) .|. (shiftReg s `shiftR` 1)
+                newBitCnt = bitCnt s + 1
+                newState = if bitCnt s == 7 then RxStop else RxData
+             in ( s {rxState = newState, oversampleCnt = 0, bitCnt = newBitCnt, shiftReg = newShift},
+                  (newShift, False)
+                )
+          else (s {oversampleCnt = oversampleCnt s + 1}, (shiftReg s, False))
+      RxStop ->
+        if oversampleCnt s == 15 -- End of stop bit
+          then
+            ( s {rxState = RxIdle, oversampleCnt = 0, bitCnt = 0},
+              (shiftReg s, rx == high) -- Valid only if stop bit is high
+            )
+          else (s {oversampleCnt = oversampleCnt s + 1}, (shiftReg s, False))
 
--- Count message transmitter (sends "CNT: N\r\n")
+-- =============================================================================
+-- Message Transmission
+-- =============================================================================
+
+-- | Transmit count messages in format "CNT: N\r\n" when LED position changes
 countMessageTx ::
   (HiddenClockResetEnable dom) =>
-  Signal dom LedPosition -> -- Current LED position
-  Signal dom Bool -> -- Position change trigger
-  (Signal dom Bit, Signal dom Bool) -- (TX line, Busy)
+  -- | Current LED position
+  Signal dom LedPosition ->
+  -- | Position change trigger
+  Signal dom Bool ->
+  -- | (TX line, Busy flag)
+  (Signal dom Bit, Signal dom Bool)
 countMessageTx ledPos trigger = (txOut, busy)
   where
-    -- Message bytes for each position
+    -- Pre-computed message bytes for each LED position
     msgBytes :: LedPosition -> Vec 8 (Unsigned 8)
     msgBytes pos =
       0x43
@@ -188,45 +201,62 @@ countMessageTx ledPos trigger = (txOut, busy)
         :> 0x0D
         :> 0x0A
         :> Nil
+    -- "CNT: N\r\n" where N is the LED position digit
 
-    -- Message transmission state
-    sendState =
-      register False
-        $ mux trigger (pure True)
-        $ mux (sendState .&&. not <$> txBusy .&&. (msgIndex .==. pure 7)) (pure False)
-        $ sendState
+    -- Message transmission state management
+    sendState = register False sendStateNext
+    sendStateNext =
+      mux
+        trigger
+        (pure True)
+        ( mux
+            (sendState .&&. not <$> txBusy .&&. (msgIndex .==. pure 7))
+            (pure False)
+            sendState
+        )
 
-    -- Message byte index
-    msgIndex =
-      register (0 :: Unsigned 3)
-        $ mux trigger (pure 0)
-        $ mux (sendState .&&. not <$> txBusy .&&. (msgIndex .<. pure 7)) (pure 1 + msgIndex)
-        $ msgIndex
+    -- Message byte index counter
+    msgIndex = register (0 :: Unsigned 3) msgIndexNext
+    msgIndexNext =
+      mux
+        trigger
+        (pure 0)
+        ( mux
+            (sendState .&&. not <$> txBusy .&&. (msgIndex .<. pure 7))
+            (msgIndex + pure 1)
+            msgIndex
+        )
 
-    -- Current message
+    -- Current message buffer
     currentMsg = regEn (msgBytes Led0) trigger (msgBytes <$> ledPos)
 
-    -- Start transmission
+    -- Transmission control
     startTx = trigger .||. (sendState .&&. not <$> txBusy .&&. (msgIndex .<. pure 7))
-
-    -- Current byte to send
     currentByte = liftA2 (!!) currentMsg msgIndex
 
-    -- UART transmitter
+    -- UART transmitter instance
     (txOut, txBusy) = uartTx startTx currentByte
     busy = sendState
 
--- === Key Input Processing ===
+-- =============================================================================
+-- Keyboard Input Processing
+-- =============================================================================
 
--- Convert received keys to button events
+-- | Convert received UART characters to button events
+-- Supports multiple key mappings for each button:
+-- Button 1: '1', 'A', 'a' (mode toggle)
+-- Button 2: '2', ' ' (space), '\r' (enter) (manual advance)
 keyToButtonEvents ::
   (HiddenClockResetEnable dom) =>
-  Signal dom (Unsigned 8) -> -- Received data
-  Signal dom Bool -> -- Data valid
-  (Signal dom ButtonEvent, Signal dom ButtonEvent) -- (btn1Event, btn2Event)
+  -- | Received character
+  Signal dom (Unsigned 8) ->
+  -- | Data valid flag
+  Signal dom Bool ->
+  -- | (Button 1 event, Button 2 event)
+  (Signal dom ButtonEvent, Signal dom ButtonEvent)
 keyToButtonEvents rxData dataValid = (btn1Event, btn2Event)
   where
-    -- Key mappings
+    -- Button 1 key detection (mode toggle)
     isBtn1Key =
       dataValid
         .&&. ( (rxData .==. pure 0x31)
@@ -235,12 +265,13 @@ keyToButtonEvents rxData dataValid = (btn1Event, btn2Event)
                  -- 'a'
              )
 
+    -- Button 2 key detection (advance)
     isBtn2Key =
       dataValid
         .&&. ( (rxData .==. pure 0x32)
                  .||. (rxData .==. pure 0x20) -- '2'
-                 .||. (rxData .==. pure 0x0D) -- Space
-                 -- Enter
+                 .||. (rxData .==. pure 0x0D) -- ' ' (space)
+                 -- '\r' (enter)
              )
 
     -- Generate button events
